@@ -81,4 +81,74 @@ class MultiHeadAttentionBlock(nn.Module):
         self.w_q = nn.Linear(d_model, d_model) # Wq
         self.w_k = nn.Linear(d_model, d_model) # Wk
         self.w_v = nn.Linear(d_model, d_model) # Wv
-               
+        
+        self.w_o = nn.Linear(d_model,d_model) #Wo
+        self.dropout = nn.Dropout(dropout)
+    
+    @staticmethod
+    def attention(query, key, value, mask, dropout: nn.Dropout):
+        d_k = query.shape[-1]
+        
+        # (Batch, h, Seq_Len, d_k) --> (Batch, h, Seq_Len, Seq_len)
+        attentioon_scores = (query @ key.transpose(-2, -1)) / math.sqrt(d_k)
+        if mask is not None:
+            attentioon_scores.masked_fill_(mask == 0, -1e9)
+        attentioon_scores = attentioon_scores.softmax(dim = -1) # (Batch, h, seq_len, seq_len)
+        if dropout is not None:
+            attentioon_scores = dropout(attentioon_scores)
+        
+        return (attentioon_scores @ value), attentioon_scores
+     
+    def forward(self, q, k, v, mask):
+        query = self.w_q(q) # (Batch, Seq_Len, d_model) --> (Batch, Seq_Len, d_model)
+        key = self.w_k(k)  # (Batch, Seq_Len, d_model) --> (Batch, Seq_Len, d_model)
+        value = self.w_v(v) # (Batch, Seq_Len, d_model) --> (Batch, Seq_Len, d_model)
+        
+        # (Batch, Seq_Len, d_model) --> (Batch, Seq_Len, h, d_k) --> (Batch, h, Seq_len, d_k)
+        query = query.view(query.shape[0], query.shape[1], self.d_k).transpose(1, 2)
+        key = query.view(key.shape[0], key.shape[1], self.h, self.d_k).transpose(1, 2)
+        value = value.view(value.shape[0], key.shape[1], self.h, self.d_k).transpose(1, 2)
+        
+        x, self.attention_scores = MultiHeadAttentionBlock.attention(query, key, value, mask, self.dropout)
+        
+        # (Batch, h, Seq_Len, d_k) --> (Batch, Seq_Len, h, d_k) --> (Batch, Seq_Len, d_model)
+        x = x.transpose(1,2).contiguous().view(x.shape[0], -1, self.h * self.d_k)
+        
+        # (Batchm Seq_len, d_model) --> (Batch, Seq_Len, d_model)
+        return self.w_o(x)
+    
+class ResidualConnection(nn.Module):
+    
+    def __init__(self, dropout: float) ->None:
+        super().__init__() 
+        self.dropout = nn.Dropout(dropout)
+        self.norm = LayerNormalization()
+    
+    def forward(self, x, sublayer):
+        return x + self.dropout(sublayer(self.norm(x)))
+    
+class EncoderBlock(nn.Module):
+    
+    def __init__(self, self_atttention_block: MultiHeadAttentionBlock, feed_forward_block: FeedForwardBlock, dropout: float) -> None:
+        super().__init__()
+        self.self_attention_block = self_atttention_block
+        self.feed_forward_block = feed_forward_block
+        self.residual_connections = nn.ModuleList([ResidualConnection(dropout) for _ in range(2)])
+        
+    def forward(self, x, src_mask):
+        x = self.residual_connections[0](x, lambda x: self.self_attention_block(x, x, x, src_mask))
+        x = self.residual_connections[1](x, self.feed_forward_block)
+        return x
+    
+class Encoder(nn.Module):
+    
+    def __init__(self, layer) -> None:
+        super().__init__()
+        self.norm = LayerNormalization()
+    
+    def forward(self, x, mask):
+        for layer in self.layers:
+            x = layer(x, mask)
+        return self.norm(x)
+        
+        
